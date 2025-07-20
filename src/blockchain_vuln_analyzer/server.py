@@ -39,11 +39,19 @@ async def handle_read_resource(uri: AnyUrl) -> str:
     if uri.scheme != "analysis":
         raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
 
-    analysis_id = uri.path
-    if analysis_id is not None:
-        analysis_id = analysis_id.lstrip("/")
-        if analysis_id in analysis_results:
-            return json.dumps(analysis_results[analysis_id], indent=2)
+    # Extract analysis_id from URI path, handling different path formats
+    analysis_id = None
+    if hasattr(uri, 'path') and uri.path:
+        # Remove leading slash and extract the analysis ID
+        path_parts = uri.path.lstrip("/").split("/")
+        if len(path_parts) >= 2 and path_parts[0] == "internal":
+            analysis_id = path_parts[1]
+        elif len(path_parts) >= 1:
+            analysis_id = path_parts[0]
+    
+    if analysis_id and analysis_id in analysis_results:
+        return json.dumps(analysis_results[analysis_id], indent=2)
+    
     raise ValueError(f"Analysis result not found: {analysis_id}")
 
 @server.list_prompts()
@@ -118,36 +126,52 @@ async def handle_call_tool(
     if not tool_processor:
         raise ValueError(f"Unknown tool: {name}")
 
-    result, formatter = await tool_processor.process(arguments)
+    try:
+        result, formatter = await tool_processor.process(arguments)
 
-    # Store result for resource access
-    tool_name_prefix = name.split("-")[0]
-    analysis_id = f"{tool_name_prefix}_{len(analysis_results)}"
-    analysis_results[analysis_id] = result
+        # Store result for resource access
+        tool_name_prefix = name.split("-")[0]
+        analysis_id = f"{tool_name_prefix}_{len(analysis_results)}"
+        analysis_results[analysis_id] = result
 
-    # Notify clients of new resource
-    await server.request_context.session.send_resource_list_changed()
+        # Notify clients of new resource if we have a session context
+        try:
+            if hasattr(server, 'request_context') and server.request_context and hasattr(server.request_context, 'session'):
+                await server.request_context.session.send_resource_list_changed()
+        except Exception:
+            # Ignore notification errors - they're not critical
+            pass
 
-    # Format and return response
-    response_text = formatter(analysis_id)
-    return [types.TextContent(type="text", text=response_text)]
+        # Format and return response
+        response_text = formatter(analysis_id)
+        return [types.TextContent(type="text", text=response_text)]
+    
+    except Exception as e:
+        error_msg = f"Tool execution failed: {str(e)}"
+        return [types.TextContent(type="text", text=error_msg)]
 
 
 async def main():
-    # Run the server using stdin/stdout streams
-    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            InitializationOptions(
-                server_name="blockchain-vuln-analyzer",
-                server_version="0.1.0",
-                capabilities=server.get_capabilities(
-                    notification_options=NotificationOptions(),
-                    experimental_capabilities={},
+    """Main entry point for the MCP server."""
+    try:
+        # Run the server using stdin/stdout streams
+        async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+            await server.run(
+                read_stream,
+                write_stream,
+                InitializationOptions(
+                    server_name="blockchain-vuln-analyzer",
+                    server_version="0.1.0",
+                    capabilities=server.get_capabilities(
+                        notification_options=NotificationOptions(),
+                        experimental_capabilities={},
+                    ),
                 ),
-            ),
-        )
+            )
+    except Exception as e:
+        import sys
+        print(f"Error starting MCP server: {e}", file=sys.stderr)
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -18,6 +18,16 @@ from .maian import (
     run_maian_analysis,
     format_maian_response,
 )
+from .smartcheck import (
+    SMARTCHECK_TOOL_DEFINITION,
+    run_smartcheck_analysis,
+    format_smartcheck_response,
+)
+from .manticore import (
+    MANTICORE_TOOL_DEFINITION,
+    run_manticore_analysis,
+    format_manticore_response,
+)
 from .main import ToolProcessor
 
 # A list of all tool definitions
@@ -26,6 +36,8 @@ ALL_TOOLS = [
     SLITHER_TOOL_DEFINITION,
     ECHIDNA_TOOL_DEFINITION,
     MAIAN_TOOL_DEFINITION,
+    SMARTCHECK_TOOL_DEFINITION,
+    MANTICORE_TOOL_DEFINITION,
 ]
 
 # A map of tool processors
@@ -72,6 +84,26 @@ TOOL_PROCESSORS = {
             "contract_file": args.get("contract_file"),
             "contract_name": args.get("contract_name"),
             "analysis_type": args.get("analysis_type", "suicidal"),
+            "output_format": args.get("output_format", "text"),
+        },
+    ),
+    "smartcheck-analyze": ToolProcessor(
+        runner=run_smartcheck_analysis,
+        formatter=format_smartcheck_response,
+        argument_extractor=lambda args: {
+            "contract_code": args.get("contract_code"),
+            "contract_file": args.get("contract_file"),
+            "rules_file": args.get("rules_file"),
+            "output_format": args.get("output_format", "text"),
+        },
+    ),
+    "manticore-analyze": ToolProcessor(
+        runner=run_manticore_analysis,
+        formatter=format_manticore_response,
+        argument_extractor=lambda args: {
+            "contract_code": args.get("contract_code"),
+            "contract_file": args.get("contract_file"),
+            "output_dir": args.get("output_dir"),
             "output_format": args.get("output_format", "text"),
         },
     ),

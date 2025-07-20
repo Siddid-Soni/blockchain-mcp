@@ -28,8 +28,7 @@ MYTHRIL_TOOL_DEFINITION = types.Tool(
             },
             "max_depth": {
                 "type": "integer",
-                "description": "Maximum transaction depth for analysis (default: 12)",
-                "default": 12,
+                "description": "Maximum transaction depth for analysis",
                 "minimum": 1,
                 "maximum": 50,
             },
