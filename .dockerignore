@@ -34,9 +34,9 @@ debug/
 *.log
 
 # 7. Documentation and markdown
-README*
-*.md
+README.md.bak
 docs/
+# Allow README.md for package metadata
 
 # 8. Environment and secrets
 .env*
