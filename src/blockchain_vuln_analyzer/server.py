@@ -226,37 +226,43 @@ async def run_mythril_analysis(contract_code: str = None, contract_file: str = N
         if temp_file and os.path.exists(temp_file.name):
             os.unlink(temp_file.name)
         
+        # Parse JSON output - Mythril returns non-zero exit code even on successful analysis
+        stdout_text = stdout.decode() if stdout else ""
+        stderr_text = stderr.decode() if stderr else ""
+        
+        if stdout_text:
+            try:
+                result = json.loads(stdout_text)
+                return {
+                    "success": True,
+                    "tool": "mythril",
+                    "analysis_mode": analysis_mode,
+                    "max_depth": max_depth,
+                    "vulnerabilities": result.get("issues", []),
+                    "raw_output": result
+                }
+            except json.JSONDecodeError:
+                # If JSON parsing fails but we have output, return it as raw
+                return {
+                    "success": True,
+                    "tool": "mythril", 
+                    "analysis_mode": analysis_mode,
+                    "max_depth": max_depth,
+                    "raw_output": stdout_text,
+                    "note": "Could not parse JSON output, showing raw results"
+                }
+        
+        # Only treat as error if no stdout and non-zero return code
         if process.returncode != 0:
-            error_msg = stderr.decode() if stderr else "Unknown error"
+            error_msg = stderr_text if stderr_text else "Unknown error"
             return {
                 "success": False,
                 "error": f"Mythril analysis failed: {error_msg}",
                 "tool": "mythril"
             }
-        
-        # Parse JSON output
-        try:
-            result = json.loads(stdout.decode())
-            return {
-                "success": True,
-                "tool": "mythril",
-                "analysis_mode": analysis_mode,
-                "max_depth": max_depth,
-                "vulnerabilities": result.get("issues", []),
-                "raw_output": result
-            }
-        except json.JSONDecodeError:
-            # If JSON parsing fails, return raw output
-            return {
-                "success": True,
-                "tool": "mythril", 
-                "analysis_mode": analysis_mode,
-                "max_depth": max_depth,
-                "raw_output": stdout.decode(),
-                "note": "Could not parse JSON output, showing raw results"
-            }
             
     except Exception as e:
+        print(f"Error running Mythril analysis: {e}")
         return {
             "success": False,
             "error": f"Mythril analysis error: {str(e)}",
@@ -380,8 +386,11 @@ async def handle_call_tool(
         analysis_id = f"mythril_{len(analysis_results)}"
         analysis_results[analysis_id] = result
         
-        # Notify clients of new resource
-        await server.request_context.session.send_resource_list_changed()
+        # Notify clients of new resource (only if server context is available)
+        try:
+            await server.request_context.session.send_resource_list_changed()
+        except:
+            pass  # Ignore if not in server context (e.g., during testing)
         
         # Format response
         if result["success"]:
@@ -423,8 +432,11 @@ async def handle_call_tool(
         analysis_id = f"slither_{len(analysis_results)}"
         analysis_results[analysis_id] = result
         
-        # Notify clients of new resource
-        await server.request_context.session.send_resource_list_changed()
+        # Notify clients of new resource (only if server context is available)
+        try:
+            await server.request_context.session.send_resource_list_changed()
+        except:
+            pass  # Ignore if not in server context (e.g., during testing)
         
         # Format response
         if result["success"]:

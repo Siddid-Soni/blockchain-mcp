@@ -6,7 +6,7 @@ import asyncio
 async def run_agent(message: str) -> None:
     async with MCPTools(timeout_seconds=1000, command=f"uv --directory /home/siddid/blockchain/mcp run blockchain-vuln-analyzer") as mcp_tools:
         agent = Agent(
-            model=Gemini(id="gemini-2.5-pro", api_key="AIzaSyDs60z0WzEeBIa2VzrZoGu131wVTAT6wLc"),
+            model=Gemini(id="gemini-2.5-flash", api_key="AIzaSyDs60z0WzEeBIa2VzrZoGu131wVTAT6wLc"),
             description=""" # Ethereum Smart Contract Security Analysis Agent
 
 You are an intelligent security analysis agent specialized in detecting vulnerabilities in Ethereum smart contracts. Your primary objective is to analyze smart contracts using multiple security tools, provide comprehensive vulnerability assessments, and generate consistent security scores.""",
