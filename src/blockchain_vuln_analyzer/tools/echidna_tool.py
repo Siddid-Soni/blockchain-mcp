@@ -4,6 +4,7 @@ Echidna analysis tool for blockchain property-based testing.
 
 import asyncio
 import json
+import os
 from typing import Dict, Any, Optional, List
 
 import mcp.types as types
@@ -40,13 +41,13 @@ class EchidnaTool(BaseTool):
                         "type": "string",
                         "enum": ["property", "assertion", "dapptest", "optimization", "overflow", "exploration"],
                         "description": "Test mode to use for analysis",
-                        "default": "property"
+                        "default": "assertion"
                     },
                     "output_format": {
                         "type": "string",
                         "enum": ["json", "text", "none"],
                         "description": "Output format for analysis results",
-                        "default": "json"
+                        "default": "text"
                     },
                     "timeout": {
                         "type": "integer",
@@ -95,8 +96,8 @@ class EchidnaTool(BaseTool):
         }
     
     async def analyze(self, contract_code: Optional[str] = None, contract_file: Optional[str] = None,
-                     contract_name: Optional[str] = None, test_mode: str = "property",
-                     output_format: str = "json", timeout: int = 60, test_limit: int = 50000,
+                     contract_name: Optional[str] = None, test_mode: str = "assertion",
+                     output_format: str = "text", timeout: int = 60, test_limit: int = 50000,
                      seq_len: int = 100, workers: int = 1, seed: Optional[int] = None,
                      disable_slither: bool = False) -> Dict[str, Any]:
         """Run Echidna property-based testing on a smart contract."""
@@ -141,11 +142,26 @@ class EchidnaTool(BaseTool):
             if disable_slither:
                 cmd.append("--disable-slither")
 
+            # Set up environment to ensure crytic-compile is found
+            env = os.environ.copy()
+            # Add common paths where crytic-compile might be installed
+            additional_paths = [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin"
+            ]
+            current_path = env.get("PATH", "")
+            for path in additional_paths:
+                if path not in current_path:
+                    current_path = f"{path}:{current_path}"
+            env["PATH"] = current_path
+
             # Run echidna
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
+                stderr=asyncio.subprocess.PIPE,
+                env=env
             )
             
             stdout, stderr = await process.communicate()
@@ -174,7 +190,7 @@ class EchidnaTool(BaseTool):
                     # If JSON parsing fails, treat as text output
                     pass
             
-            # Handle non-JSON output or parsing errors
+            # Handle text/non-JSON output or parsing errors
             if process.returncode == 0 or output:
                 return {
                     "success": True,
@@ -212,19 +228,58 @@ class EchidnaTool(BaseTool):
     def format_response(self, result: Dict[str, Any], analysis_id: str) -> str:
         """Format the analysis result into a human-readable response."""
         if result["success"]:
-            test_mode = result.get("test_mode", "property")
+            test_mode = result.get("test_mode", "assertion")
             timeout = result.get("timeout", "unknown")
             test_limit = result.get("test_limit", "unknown")
+            output_format = result.get("output_format", "text")
             
             summary = f"Echidna {test_mode} testing completed"
             
             response_text = f"{summary}\n\nAnalysis ID: {analysis_id}\n"
             response_text += f"Test Mode: {test_mode}\n"
+            response_text += f"Output Format: {output_format}\n"
             response_text += f"Timeout: {timeout}s\n"
             response_text += f"Test Limit: {test_limit}\n"
             
-            # Try to extract meaningful information from results
-            if "results" in result and isinstance(result["results"], dict):
+            # Handle text output format (most common for assertion mode)
+            if output_format == "text" and "raw_output" in result:
+                raw_output = result["raw_output"]
+                if isinstance(raw_output, str) and raw_output.strip():
+                    response_text += "\nTest Results:\n"
+                    # Look for key patterns in text output
+                    lines = raw_output.split('\n')
+                    failed_assertions = []
+                    passed_assertions = []
+                    
+                    for line in lines:
+                        if "failed!" in line.lower() or "falsified!" in line.lower():
+                            failed_assertions.append(line.strip())
+                        elif "passed" in line.lower() and ("test" in line.lower() or "assertion" in line.lower()):
+                            passed_assertions.append(line.strip())
+                    
+                    if failed_assertions:
+                        response_text += f"\n❌ Failed Assertions ({len(failed_assertions)}):\n"
+                        for failure in failed_assertions[:3]:  # Show first 3
+                            response_text += f"  • {failure}\n"
+                        if len(failed_assertions) > 3:
+                            response_text += f"  • ... and {len(failed_assertions) - 3} more failures\n"
+                    
+                    if passed_assertions:
+                        response_text += f"\n✅ Passed Assertions ({len(passed_assertions)}):\n"
+                        for success in passed_assertions[:3]:  # Show first 3
+                            response_text += f"  • {success}\n"
+                        if len(passed_assertions) > 3:
+                            response_text += f"  • ... and {len(passed_assertions) - 3} more passes\n"
+                    
+                    if not failed_assertions and not passed_assertions:
+                        response_text += "\nRaw Output Preview:\n"
+                        preview = raw_output[:500] + "..." if len(raw_output) > 500 else raw_output
+                        response_text += f"{preview}\n"
+                else:
+                    response_text += "\nNo detailed output available.\n"
+            
+            # Handle JSON output format
+            elif output_format == "json" and "results" in result and isinstance(result["results"], dict):
                 results_data = result["results"]
                 
                 # Look for common Echidna result patterns
@@ -246,10 +301,8 @@ class EchidnaTool(BaseTool):
                     for prop_name, prop_result in properties.items():
                         status = prop_result.get("status", "unknown")
                         response_text += f"  - {prop_name}: {status}\n"
-                
-                response_text += "\nSee full results in analysis resource for detailed information."
-            else:
-                response_text += "\nAnalysis completed. See full results in analysis resource."
+            
+            response_text += "\nSee full results in analysis resource for detailed information."
         else:
             response_text = f"Echidna analysis failed: {result['error']}"
             if "exit_code" in result:
