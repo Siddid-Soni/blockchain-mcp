@@ -1,26 +1,12 @@
 from agno.agent import Agent
 from agno.models.google import Gemini
-from pathlib import Path
-from typing import List, Optional, Union
-from agno.tools import Toolkit
-from agno.utils.log import logger
 from agno.tools.mcp import MCPTools
 import asyncio
 
 async def run_agent(message: str) -> None:
-    # Use a more flexible command that works from the current directory
-    import os
-    current_dir = os.getcwd()
-    
-    # Create the command with proper environment setup
-    mcp_command = f"PYTHONPATH={current_dir}/src python3 -m blockchain_vuln_analyzer"
-    
-    async with MCPTools(
-        timeout_seconds=1000,
-        command=mcp_command
-    ) as mcp_tools:
+    async with MCPTools(timeout_seconds=1000, command=f"uv --directory /home/siddid/blockchain/mcp run blockchain-vuln-analyzer") as mcp_tools:
         agent = Agent(
-            model=Gemini(id="gemini-2.5-flash", api_key="AIzaSyDs60z0WzEeBIa2VzrZoGu131wVTAT6wLc"),
+            model=Gemini(id="gemini-2.5-pro", api_key="AIzaSyDs60z0WzEeBIa2VzrZoGu131wVTAT6wLc"),
             description=""" # Ethereum Smart Contract Security Analysis Agent
 
 You are an intelligent security analysis agent specialized in detecting vulnerabilities in Ethereum smart contracts. Your primary objective is to analyze smart contracts using multiple security tools, provide comprehensive vulnerability assessments, and generate consistent security scores.""",
@@ -125,6 +111,7 @@ Where:
 For each analysis, provide:
 
 ### Executive Summary
+- Skip Naming Convention Violation and other minor issues
 - Overall security score
 - Risk level assessment
 - Critical findings count
