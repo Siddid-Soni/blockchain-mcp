@@ -1,7 +1,4 @@
 import asyncio
-import subprocess
-import tempfile
-import os
 import json
 from pathlib import Path
 
@@ -10,12 +7,14 @@ import mcp.types as types
 from mcp.server import NotificationOptions, Server
 from pydantic import AnyUrl
 import mcp.server.stdio
-from .tools import ALL_TOOLS, TOOL_PROCESSORS
+
+from .tools import ToolManager
 
 # Store analysis results for resource access
 analysis_results: dict[str, dict] = {}
 
 server = Server("blockchain-vuln-analyzer")
+tool_manager = ToolManager()
 
 @server.list_resources()
 async def handle_list_resources() -> list[types.Resource]:
@@ -94,10 +93,11 @@ async def handle_get_prompt(
                 content=types.TextContent(
                     type="text",
                     text=f"Please analyze this {contract_type} smart contract focusing on {focus_area}. "
-                         f"Use the mythril-analyze and slither-analyze tools to perform comprehensive "
+                         f"Use the mythril-analyze, slither-analyze, and echidna-analyze tools to perform comprehensive "
                          f"vulnerability analysis. Look for common issues like reentrancy attacks, "
                          f"integer overflow/underflow, access control vulnerabilities, and other "
-                         f"security concerns specific to {contract_type} contracts.",
+                         f"security concerns specific to {contract_type} contracts. Use Echidna for "
+                         f"property-based testing to find edge cases and test contract invariants.",
                 ),
             )
         ],
@@ -108,253 +108,7 @@ async def handle_list_tools() -> list[types.Tool]:
     """
     List available blockchain vulnerability analysis tools.
     """
-    return [
-        types.Tool(
-            name="mythril-analyze",
-            description="Analyze Solidity smart contracts using Mythril for security vulnerabilities",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "contract_code": {
-                        "type": "string",
-                        "description": "The Solidity contract source code to analyze"
-                    },
-                    "contract_file": {
-                        "type": "string", 
-                        "description": "Path to the contract file (alternative to contract_code)"
-                    },
-                    "analysis_mode": {
-                        "type": "string",
-                        "enum": ["quick", "standard", "deep"],
-                        "description": "Analysis depth mode",
-                        "default": "standard"
-                    },
-                    "max_depth": {
-                        "type": "integer",
-                        "description": "Maximum transaction depth for analysis (default: 12)",
-                        "default": 12,
-                        "minimum": 1,
-                        "maximum": 50
-                    }
-                },
-                "required": [],
-                "anyOf": [
-                    {"required": ["contract_code"]},
-                    {"required": ["contract_file"]}
-                ]
-            },
-        ),
-        types.Tool(
-            name="slither-analyze", 
-            description="Analyze Solidity smart contracts using Slither static analysis framework",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "contract_code": {
-                        "type": "string",
-                        "description": "The Solidity contract source code to analyze"
-                    },
-                    "contract_file": {
-                        "type": "string",
-                        "description": "Path to the contract file (alternative to contract_code)"
-                    },
-                    "output_format": {
-                        "type": "string",
-                        "enum": ["text", "json", "markdown"],
-                        "description": "Output format for the analysis results",
-                        "default": "json"
-                    },
-                    "exclude_detectors": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of detector names to exclude from analysis"
-                    },
-                    "include_detectors": {
-                        "type": "array", 
-                        "items": {"type": "string"},
-                        "description": "List of specific detectors to run (if not specified, runs all)"
-                    }
-                },
-                "required": [],
-                "anyOf": [
-                    {"required": ["contract_code"]},
-                    {"required": ["contract_file"]}
-                ]
-            },
-        )
-    ]
-
-async def run_mythril_analysis(contract_code: str = None, contract_file: str = None, 
-                             analysis_mode: str = "standard", max_depth: int = 12) -> dict:
-    """Run Mythril analysis on a smart contract."""
-    try:
-        # Create temporary file if contract_code is provided
-        temp_file = None
-        if contract_code:
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.sol', delete=False)
-            temp_file.write(contract_code)
-            temp_file.close()
-            contract_path = temp_file.name
-        elif contract_file:
-            contract_path = contract_file
-            if not os.path.exists(contract_path):
-                raise ValueError(f"Contract file not found: {contract_path}")
-        else:
-            raise ValueError("Either contract_code or contract_file must be provided")
-
-        # Build mythril command
-        cmd = ["myth", "analyze", contract_path, "-o", "json"]
-        
-        # Add analysis mode settings
-        if analysis_mode == "quick":
-            cmd.extend(["--max-depth", "3"])
-        elif analysis_mode == "deep":
-            cmd.extend(["--max-depth", str(min(max_depth * 2, 50))])
-        else:  # standard
-            cmd.extend(["--max-depth", str(max_depth)])
-
-        # Run mythril
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        # Clean up temp file
-        if temp_file and os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
-        
-        # Parse JSON output - Mythril returns non-zero exit code even on successful analysis
-        stdout_text = stdout.decode() if stdout else ""
-        stderr_text = stderr.decode() if stderr else ""
-        
-        if stdout_text:
-            try:
-                result = json.loads(stdout_text)
-                return {
-                    "success": True,
-                    "tool": "mythril",
-                    "analysis_mode": analysis_mode,
-                    "max_depth": max_depth,
-                    "vulnerabilities": result.get("issues", []),
-                    "raw_output": result
-                }
-            except json.JSONDecodeError:
-                # If JSON parsing fails but we have output, return it as raw
-                return {
-                    "success": True,
-                    "tool": "mythril", 
-                    "analysis_mode": analysis_mode,
-                    "max_depth": max_depth,
-                    "raw_output": stdout_text,
-                    "note": "Could not parse JSON output, showing raw results"
-                }
-        
-        # Only treat as error if no stdout and non-zero return code
-        if process.returncode != 0:
-            error_msg = stderr_text if stderr_text else "Unknown error"
-            return {
-                "success": False,
-                "error": f"Mythril analysis failed: {error_msg}",
-                "tool": "mythril"
-            }
-            
-    except Exception as e:
-        print(f"Error running Mythril analysis: {e}")
-        return {
-            "success": False,
-            "error": f"Mythril analysis error: {str(e)}",
-            "tool": "mythril"
-        }
-
-
-async def run_slither_analysis(contract_code: str = None, contract_file: str = None,
-                             output_format: str = "json", exclude_detectors: list = None,
-                             include_detectors: list = None) -> dict:
-    """Run Slither analysis on a smart contract."""
-    try:
-        # Create temporary file if contract_code is provided
-        temp_file = None
-        if contract_code:
-            temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.sol', delete=False)
-            temp_file.write(contract_code)
-            temp_file.close()
-            contract_path = temp_file.name
-        elif contract_file:
-            contract_path = contract_file
-            if not os.path.exists(contract_path):
-                raise ValueError(f"Contract file not found: {contract_path}")
-        else:
-            raise ValueError("Either contract_code or contract_file must be provided")
-
-        # Build slither command
-        cmd = ["slither", contract_path]
-        
-        # Add output format
-        if output_format == "json":
-            cmd.extend(["--json", "-"])
-        
-        # Add detector filters
-        if exclude_detectors:
-            cmd.extend(["--exclude", ",".join(exclude_detectors)])
-        if include_detectors:
-            cmd.extend(["--include", ",".join(include_detectors)])
-
-        # Run slither
-        process = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        
-        stdout, stderr = await process.communicate()
-        
-        # Clean up temp file
-        if temp_file and os.path.exists(temp_file.name):
-            os.unlink(temp_file.name)
-        
-        # Slither may return non-zero exit code even on successful analysis with findings
-        output = stdout.decode() if stdout else ""
-        error_output = stderr.decode() if stderr else ""
-        
-        if output_format == "json" and output:
-            try:
-                result = json.loads(output)
-                return {
-                    "success": True,
-                    "tool": "slither",
-                    "output_format": output_format,
-                    "results": result.get("results", {}),
-                    "detector_info": result.get("detectors", []),
-                    "raw_output": result
-                }
-            except json.JSONDecodeError:
-                pass
-        
-        # Return text output or handle errors
-        if not output and error_output:
-            return {
-                "success": False,
-                "error": f"Slither analysis failed: {error_output}",
-                "tool": "slither"
-            }
-        
-        return {
-            "success": True,
-            "tool": "slither",
-            "output_format": output_format,
-            "raw_output": output,
-            "stderr": error_output if error_output else None
-        }
-            
-    except Exception as e:
-        return {
-            "success": False,
-            "error": f"Slither analysis error: {str(e)}",
-            "tool": "slither"
-        }
+    return tool_manager.get_tool_schemas()
 
 
 @server.call_tool()
@@ -367,23 +121,12 @@ async def handle_call_tool(
     if not arguments:
         arguments = {}
 
-    if name == "mythril-analyze":
-        # Extract arguments
-        contract_code = arguments.get("contract_code")
-        contract_file = arguments.get("contract_file") 
-        analysis_mode = arguments.get("analysis_mode", "standard")
-        max_depth = arguments.get("max_depth", 12)
-        
-        # Run analysis
-        result = await run_mythril_analysis(
-            contract_code=contract_code,
-            contract_file=contract_file,
-            analysis_mode=analysis_mode,
-            max_depth=max_depth
-        )
+    try:
+        # Run analysis using tool manager
+        result = await tool_manager.execute_tool(name, arguments)
         
         # Store result for resource access
-        analysis_id = f"mythril_{len(analysis_results)}"
+        analysis_id = f"{name.replace('-', '_')}_{len(analysis_results)}"
         analysis_results[analysis_id] = result
         
         # Notify clients of new resource (only if server context is available)
@@ -392,76 +135,14 @@ async def handle_call_tool(
         except:
             pass  # Ignore if not in server context (e.g., during testing)
         
-        # Format response
-        if result["success"]:
-            vulnerabilities = result.get("vulnerabilities", [])
-            summary = f"Mythril analysis completed. Found {len(vulnerabilities)} potential issues."
-            
-            response_text = f"{summary}\n\nAnalysis ID: {analysis_id}\n"
-            if vulnerabilities:
-                response_text += "\nVulnerabilities found:\n"
-                for i, vuln in enumerate(vulnerabilities[:5]):  # Show first 5
-                    response_text += f"{i+1}. {vuln.get('title', 'Unknown')}: {vuln.get('description', 'No description')}\n"
-                if len(vulnerabilities) > 5:
-                    response_text += f"... and {len(vulnerabilities) - 5} more. See full results in analysis resource."
-            else:
-                response_text += "\nNo vulnerabilities detected."
-        else:
-            response_text = f"Mythril analysis failed: {result['error']}"
+        # Format response using tool manager
+        response_text = tool_manager.format_tool_response(name, result, analysis_id)
         
         return [types.TextContent(type="text", text=response_text)]
         
-    elif name == "slither-analyze":
-        # Extract arguments
-        contract_code = arguments.get("contract_code")
-        contract_file = arguments.get("contract_file")
-        output_format = arguments.get("output_format", "json")
-        exclude_detectors = arguments.get("exclude_detectors", [])
-        include_detectors = arguments.get("include_detectors", [])
-        
-        # Run analysis
-        result = await run_slither_analysis(
-            contract_code=contract_code,
-            contract_file=contract_file,
-            output_format=output_format,
-            exclude_detectors=exclude_detectors,
-            include_detectors=include_detectors
-        )
-        
-        # Store result for resource access  
-        analysis_id = f"slither_{len(analysis_results)}"
-        analysis_results[analysis_id] = result
-        
-        # Notify clients of new resource (only if server context is available)
-        try:
-            await server.request_context.session.send_resource_list_changed()
-        except:
-            pass  # Ignore if not in server context (e.g., during testing)
-        
-        # Format response
-        if result["success"]:
-            if output_format == "json" and "results" in result:
-                detectors = result.get("results", {}).get("detectors", [])
-                summary = f"Slither analysis completed. Found {len(detectors)} detector results."
-                
-                response_text = f"{summary}\n\nAnalysis ID: {analysis_id}\n"
-                if detectors:
-                    response_text += "\nDetector results:\n"
-                    for i, detector in enumerate(detectors[:5]):  # Show first 5
-                        response_text += f"{i+1}. {detector.get('check', 'Unknown')}: {len(detector.get('elements', []))} issues\n"
-                    if len(detectors) > 5:
-                        response_text += f"... and {len(detectors) - 5} more detectors. See full results in analysis resource."
-                else:
-                    response_text += "\nNo issues detected."
-            else:
-                response_text = f"Slither analysis completed.\n\nAnalysis ID: {analysis_id}\nSee full results in analysis resource."
-        else:
-            response_text = f"Slither analysis failed: {result['error']}"
-            
-        return [types.TextContent(type="text", text=response_text)]
-    
-    else:
-        raise ValueError(f"Unknown tool: {name}")
+    except Exception as e:
+        error_msg = f"Tool execution failed: {str(e)}"
+        return [types.TextContent(type="text", text=error_msg)]
 
 async def main():
     # Run the server using stdin/stdout streams
